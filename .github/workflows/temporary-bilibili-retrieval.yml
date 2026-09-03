@@ -1,4 +1,4 @@
-name: Temporary Bilibili Retrieval
+name: Temporary Bilibili Fast Transcription
 
 on:
   push:
@@ -9,16 +9,14 @@ permissions:
   contents: read
 
 jobs:
-  retrieve-and-transcribe:
+  fast-transcription:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install media and transcription dependencies
-        shell: bash
+      - name: Install dependencies
         env:
           HF_HUB_DISABLE_XET: "1"
         run: |
@@ -27,251 +25,184 @@ jobs:
           sudo apt-get install -y -qq ffmpeg
           python -m pip install --disable-pip-version-check -q requests faster-whisper
 
-      - name: Retrieve the verified audio-only stream
-        shell: bash
+      - name: Retrieve signed Bilibili audio
         run: |
           set -euo pipefail
           mkdir -p results
           python - <<'PY'
-          from __future__ import annotations
-
-          import hashlib
-          import json
-          import time
-          import urllib.parse
+          import hashlib, json, time, urllib.parse
           from pathlib import Path
-          from typing import Any
-
           import requests
 
           BV = "BV1mZ8X6uEqD"
-          ROOT = Path("results")
-          WBI_MIXIN_TABLE = (
-              46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
-              27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
-              37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
-              22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
+          MIX = (
+              46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,
+              27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,
+              37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,
+              22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52,
           )
-          HEADERS = {
-              "User-Agent": (
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
-              ),
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
               "Referer": "https://www.bilibili.com/",
               "Origin": "https://www.bilibili.com",
-              "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
           }
-          session = requests.Session()
-          session.headers.update(HEADERS)
+          s = requests.Session()
+          s.headers.update(headers)
 
-          def get_json(url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-              response = session.get(url, params=params, timeout=(20, 60))
-              response.raise_for_status()
-              return response.json()
+          def get_json(url, params=None):
+              r = s.get(url, params=params, timeout=(20, 60))
+              r.raise_for_status()
+              return r.json()
 
           nav = get_json("https://api.bilibili.com/x/web-interface/nav")
           wbi = nav["data"]["wbi_img"]
-          img_key = wbi["img_url"].rsplit("/", 1)[-1].split(".", 1)[0]
-          sub_key = wbi["sub_url"].rsplit("/", 1)[-1].split(".", 1)[0]
-          raw_key = img_key + sub_key
-          mixin_key = "".join(raw_key[i] for i in WBI_MIXIN_TABLE)[:32]
+          img = wbi["img_url"].rsplit("/", 1)[-1].split(".", 1)[0]
+          sub = wbi["sub_url"].rsplit("/", 1)[-1].split(".", 1)[0]
+          raw = img + sub
+          key = "".join(raw[i] for i in MIX)[:32]
 
-          def sign(params: dict[str, Any]) -> dict[str, str]:
-              signed: dict[str, str] = {}
-              for key, value in params.items():
-                  text = str(value)
-                  for forbidden in "!'()*":
-                      text = text.replace(forbidden, "")
-                  signed[key] = text
-              signed["wts"] = str(int(time.time()))
-              query = urllib.parse.urlencode(sorted(signed.items()))
-              signed["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
-              return signed
+          def sign(params):
+              out = {}
+              for k, v in params.items():
+                  value = str(v)
+                  for char in "!'()*":
+                      value = value.replace(char, "")
+                  out[k] = value
+              out["wts"] = str(int(time.time()))
+              query = urllib.parse.urlencode(sorted(out.items()))
+              out["w_rid"] = hashlib.md5((query + key).encode()).hexdigest()
+              return out
 
           view = get_json(
               "https://api.bilibili.com/x/web-interface/wbi/view",
               sign({"bvid": BV}),
           )
-          if view.get("code") != 0:
-              raise RuntimeError(f"Bilibili view API failed: {view}")
           data = view["data"]
-          cid = int(data["cid"])
-
-          playurl = get_json(
+          cid = data["cid"]
+          play = get_json(
               "https://api.bilibili.com/x/player/wbi/playurl",
-              sign({
-                  "bvid": BV,
-                  "cid": cid,
-                  "qn": 16,
-                  "fnval": 4048,
-                  "fnver": 0,
-                  "fourk": 0,
-              }),
+              sign({"bvid": BV, "cid": cid, "qn": 16, "fnval": 4048, "fnver": 0, "fourk": 0}),
           )
-          if playurl.get("code") != 0:
-              raise RuntimeError(f"Bilibili playurl API failed: {playurl}")
-          audio_options = ((playurl.get("data") or {}).get("dash") or {}).get("audio") or []
-          if not audio_options:
-              raise RuntimeError("Bilibili playurl returned no audio tracks")
-          selected = min(audio_options, key=lambda item: int(item.get("bandwidth") or 10**12))
-          urls = []
-          primary = selected.get("baseUrl") or selected.get("base_url")
-          if primary:
-              urls.append(primary)
-          urls.extend(selected.get("backupUrl") or selected.get("backup_url") or [])
+          tracks = play["data"]["dash"]["audio"]
+          track = min(tracks, key=lambda x: int(x.get("bandwidth") or 10**12))
+          urls = [track.get("baseUrl") or track.get("base_url")]
+          urls += track.get("backupUrl") or track.get("backup_url") or []
 
-          target = ROOT / "audio-source.m4s"
-          failures: list[str] = []
-          for media_url in urls:
+          target = Path("results/audio-source.m4s")
+          errors = []
+          for url in [u for u in urls if u]:
               try:
-                  with session.get(media_url, stream=True, timeout=(25, 90)) as response:
-                      response.raise_for_status()
-                      with target.open("wb") as output:
-                          for chunk in response.iter_content(chunk_size=1024 * 1024):
+                  with s.get(url, stream=True, timeout=(25, 90)) as r:
+                      r.raise_for_status()
+                      with target.open("wb") as f:
+                          for chunk in r.iter_content(1024 * 1024):
                               if chunk:
-                                  output.write(chunk)
-                  if target.stat().st_size > 100_000:
+                                  f.write(chunk)
+                  if target.stat().st_size > 100000:
                       break
-                  raise RuntimeError(f"Downloaded audio was unexpectedly small: {target.stat().st_size}")
               except Exception as exc:
-                  failures.append(repr(exc))
+                  errors.append(repr(exc))
                   target.unlink(missing_ok=True)
           if not target.exists():
-              raise RuntimeError(f"All signed audio URLs failed: {failures}")
+              raise RuntimeError(errors)
 
-          staff = [
-              {"name": item.get("name"), "role": item.get("title"), "official": (item.get("official") or {}).get("title")}
-              for item in data.get("staff") or []
-          ]
           metadata = {
               "bvid": BV,
-              "aid": data.get("aid"),
-              "cid": cid,
               "title": data.get("title"),
-              "description": data.get("desc"),
               "duration_seconds": data.get("duration"),
               "published_unix": data.get("pubdate"),
               "owner": data.get("owner"),
-              "staff": staff,
+              "staff": [
+                  {
+                      "name": member.get("name"),
+                      "role": member.get("title"),
+                      "official": (member.get("official") or {}).get("title"),
+                  }
+                  for member in data.get("staff") or []
+              ],
               "stats": data.get("stat"),
-              "audio_track": {
-                  "id": selected.get("id"),
-                  "bandwidth": selected.get("bandwidth"),
-                  "mime_type": selected.get("mimeType") or selected.get("mime_type"),
-                  "codecs": selected.get("codecs"),
-                  "downloaded_bytes": target.stat().st_size,
-              },
+              "downloaded_audio_bytes": target.stat().st_size,
           }
-          (ROOT / "metadata.json").write_text(
+          Path("results/metadata.json").write_text(
               json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
           )
           print(json.dumps(metadata, ensure_ascii=False, indent=2))
           PY
 
-          ffprobe -v error \
-            -show_entries format=duration,size,format_name:stream=index,codec_name,codec_type \
-            -of json results/audio-source.m4s > results/media-info.json
-          ffmpeg -hide_banner -loglevel error -y \
-            -i results/audio-source.m4s -vn -ac 1 -ar 16000 \
-            -c:a libmp3lame -b:a 48k results/audio.mp3
-          test -s results/audio.mp3
+          ffmpeg -hide_banner -loglevel error -y -i results/audio-source.m4s \
+            -vn -ac 1 -ar 16000 -c:a libmp3lame -b:a 48k results/audio.mp3
 
-      - name: Transcribe the interview
-        shell: bash
+      - name: Run fast transcript pass
         env:
           HF_HUB_DISABLE_XET: "1"
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json
-          import os
+          import json, os
           from pathlib import Path
-
           from faster_whisper import WhisperModel
 
           root = Path("results")
-          threads = max(2, min(8, os.cpu_count() or 4))
           model = WhisperModel(
-              "small",
+              "base",
               device="cpu",
               compute_type="int8",
-              cpu_threads=threads,
+              cpu_threads=max(2, min(8, os.cpu_count() or 4)),
               num_workers=2,
           )
-          generated, info = model.transcribe(
+          stream, info = model.transcribe(
               str(root / "audio.mp3"),
-              beam_size=5,
-              best_of=5,
+              beam_size=1,
+              best_of=1,
               vad_filter=True,
-              vad_parameters={"min_silence_duration_ms": 500},
+              vad_parameters={"min_silence_duration_ms": 400},
               condition_on_previous_text=True,
-              initial_prompt=(
-                  "这是一段关于投资、财富创造、创业、科技趋势和人生选择的访谈。"
-                  "主持人是本子在隔壁，嘉宾是投资人 Lars Tvede，中文名拉斯·特维德。"
-              ),
+              initial_prompt="投资人 Lars Tvede 接受本子在隔壁采访，讨论财富、投资、创业、科技与人生选择。",
           )
-
-          segments = []
-          lines = []
-          for segment in generated:
-              text = segment.text.strip()
+          segments, lines = [], []
+          for seg in stream:
+              text = seg.text.strip()
               if not text:
                   continue
-              segments.append({"start": segment.start, "end": segment.end, "text": text})
-              hours = int(segment.start // 3600)
-              minutes = int((segment.start % 3600) // 60)
-              seconds = int(segment.start % 60)
-              lines.append(f"[{hours:02d}:{minutes:02d}:{seconds:02d}] {text}")
-
+              segments.append({"start": seg.start, "end": seg.end, "text": text})
+              h = int(seg.start // 3600)
+              m = int((seg.start % 3600) // 60)
+              sec = int(seg.start % 60)
+              lines.append(f"[{h:02d}:{m:02d}:{sec:02d}] {text}")
           if not segments:
-              raise RuntimeError("Speech recognition returned no text")
-
+              raise RuntimeError("No transcript generated")
           (root / "transcript.txt").write_text("\n".join(lines), encoding="utf-8")
           (root / "transcript-segments.json").write_text(
-              json.dumps(
-                  {
-                      "language": info.language,
-                      "language_probability": info.language_probability,
-                      "duration_seconds": info.duration,
-                      "segments": segments,
-                  },
-                  ensure_ascii=False,
-                  indent=2,
-              ),
+              json.dumps({
+                  "model": "faster-whisper-base",
+                  "language": info.language,
+                  "language_probability": info.language_probability,
+                  "duration_seconds": info.duration,
+                  "segments": segments,
+              }, ensure_ascii=False, indent=2),
               encoding="utf-8",
           )
           (root / "status.json").write_text(
-              json.dumps(
-                  {
-                      "transcript_available": True,
-                      "model": "faster-whisper-small",
-                      "detected_language": info.language,
-                      "language_probability": info.language_probability,
-                      "duration_seconds": info.duration,
-                      "segment_count": len(segments),
-                      "transcript_characters": len("".join(lines)),
-                  },
-                  ensure_ascii=False,
-                  indent=2,
-              ),
+              json.dumps({
+                  "model": "faster-whisper-base",
+                  "segment_count": len(segments),
+                  "transcript_characters": len("".join(lines)),
+                  "duration_seconds": info.duration,
+              }, ensure_ascii=False, indent=2),
               encoding="utf-8",
           )
-          print(
-              f"Transcribed {len(segments)} segments over {info.duration:.1f}s; "
-              f"language={info.language} ({info.language_probability:.3f})"
-          )
+          print(f"Generated {len(segments)} transcript segments")
           PY
 
-      - name: Remove source audiovisual files
+      - name: Remove media files
         if: always()
-        shell: bash
         run: rm -f results/audio-source.m4s results/audio.mp3
 
-      - name: Upload verified metadata and transcript
+      - name: Upload transcript
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bilibili-BV1mZ8X6uEqD-results
+          name: bilibili-BV1mZ8X6uEqD-fast-results
           path: results/
           if-no-files-found: error
           retention-days: 1
