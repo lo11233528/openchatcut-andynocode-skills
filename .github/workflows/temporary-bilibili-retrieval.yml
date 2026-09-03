@@ -1,0 +1,336 @@
+name: Temporary Bilibili Retrieval
+
+on:
+  push:
+    branches:
+      - "chatgpt/bilibili-BV1mZ8X6uEqD"
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve-and-transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Fetch metadata, subtitles, and media
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p results/subtitles
+          BV="BV1mZ8X6uEqD"
+          SOURCE_URL="https://www.bilibili.com/video/${BV}"
+          UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36"
+
+          # Embed proxies can reach Bilibili even when ordinary data-centre IPs receive 412.
+          curl -fL --retry 3 --connect-timeout 20 -A "Discordbot/2.0" \
+            "https://fxbilibili.seria.moe/video/${BV}" -o results/fxbilibili-embed.html || true
+          curl -fL --retry 3 --connect-timeout 20 -A "Discordbot/2.0" \
+            "https://www.vxbilibili.com/video/${BV}" -o results/bilifix-embed.html || true
+          curl -fL --retry 3 --connect-timeout 20 \
+            "https://www.vxbilibili.com/oembed/video?id=${BV}&lang=zh-cn" -o results/bilifix-oembed.json || true
+
+          # First-party metadata and subtitle descriptors. Failures are preserved for diagnosis.
+          curl -sSL --retry 3 --connect-timeout 20 -A "$UA" \
+            -H "Referer: ${SOURCE_URL}" \
+            "https://api.bilibili.com/x/web-interface/view?bvid=${BV}" -o results/view.json || true
+
+          python - <<'PY'
+          import html
+          import json
+          import re
+          from pathlib import Path
+
+          out = Path("results")
+          summary = {}
+
+          view_path = out / "view.json"
+          if view_path.exists():
+              try:
+                  payload = json.loads(view_path.read_text(encoding="utf-8"))
+                  data = payload.get("data") or {}
+                  summary.update({
+                      "api_code": payload.get("code"),
+                      "bvid": data.get("bvid"),
+                      "aid": data.get("aid"),
+                      "cid": data.get("cid"),
+                      "title": data.get("title"),
+                      "description": data.get("desc"),
+                      "duration_seconds": data.get("duration"),
+                      "owner_name": (data.get("owner") or {}).get("name"),
+                      "owner_mid": (data.get("owner") or {}).get("mid"),
+                      "published_unix": data.get("pubdate"),
+                      "stats": data.get("stat"),
+                  })
+              except Exception as exc:
+                  summary["view_json_error"] = repr(exc)
+
+          def meta_from_html(path: Path) -> dict:
+              if not path.exists():
+                  return {}
+              text = path.read_text(encoding="utf-8", errors="replace")
+              result = {}
+              for prop in ("og:title", "og:description", "og:image", "og:video", "og:video:url"):
+                  patterns = [
+                      rf'<meta[^>]+property=["\']{re.escape(prop)}["\'][^>]+content=["\']([^"\']*)',
+                      rf'<meta[^>]+content=["\']([^"\']*)["\'][^>]+property=["\']{re.escape(prop)}["\']',
+                  ]
+                  for pattern in patterns:
+                      match = re.search(pattern, text, re.I)
+                      if match:
+                          result[prop] = html.unescape(match.group(1))
+                          break
+              return result
+
+          summary["fxbilibili_embed"] = meta_from_html(out / "fxbilibili-embed.html")
+          summary["bilifix_embed"] = meta_from_html(out / "bilifix-embed.html")
+
+          oembed_path = out / "bilifix-oembed.json"
+          if oembed_path.exists():
+              try:
+                  summary["bilifix_oembed"] = json.loads(oembed_path.read_text(encoding="utf-8"))
+              except Exception as exc:
+                  summary["bilifix_oembed_error"] = repr(exc)
+
+          (out / "metadata-summary.json").write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          PY
+
+          CID="$(python - <<'PY'
+          import json
+          try:
+              d=json.load(open('results/metadata-summary.json', encoding='utf-8'))
+              print(d.get('cid') or '')
+          except Exception:
+              print('')
+          PY
+          )"
+          AID="$(python - <<'PY'
+          import json
+          try:
+              d=json.load(open('results/metadata-summary.json', encoding='utf-8'))
+              print(d.get('aid') or '')
+          except Exception:
+              print('')
+          PY
+          )"
+
+          if [ -n "$CID" ]; then
+            curl -sSL --retry 3 --connect-timeout 20 -A "$UA" -H "Referer: ${SOURCE_URL}" \
+              "https://api.bilibili.com/x/player/v2?bvid=${BV}&cid=${CID}" -o results/player-v2.json || true
+            curl -sSL --retry 3 --connect-timeout 20 -A "$UA" -H "Referer: ${SOURCE_URL}" \
+              "https://api.bilibili.com/x/player/wbi/v2?bvid=${BV}&cid=${CID}" -o results/player-wbi-v2.json || true
+          fi
+
+          # Extract any subtitle URLs returned by Bilibili and download their JSON bodies.
+          python - <<'PY'
+          import json
+          import urllib.request
+          from pathlib import Path
+
+          root = Path("results")
+          urls = []
+          for filename in ("player-v2.json", "player-wbi-v2.json"):
+              path = root / filename
+              if not path.exists():
+                  continue
+              try:
+                  payload = json.loads(path.read_text(encoding="utf-8"))
+              except Exception:
+                  continue
+              data = payload.get("data") or {}
+              subtitle = data.get("subtitle") or {}
+              for item in subtitle.get("subtitles") or []:
+                  url = item.get("subtitle_url") or item.get("url")
+                  if url:
+                      if url.startswith("//"):
+                          url = "https:" + url
+                      urls.append((item.get("lan") or item.get("lan_doc") or "subtitle", url))
+
+          manifest = []
+          for index, (language, url) in enumerate(urls):
+              safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in language)
+              target = root / "subtitles" / f"{index:02d}-{safe}.json"
+              request = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.bilibili.com/"},
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      target.write_bytes(response.read())
+                  manifest.append({"language": language, "url": url, "file": str(target)})
+              except Exception as exc:
+                  manifest.append({"language": language, "url": url, "error": repr(exc)})
+
+          (root / "subtitle-manifest.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(manifest, ensure_ascii=False, indent=2))
+          PY
+
+          # yt-dlp sometimes succeeds at subtitle extraction even when a basic API call is blocked.
+          python -m pip install --disable-pip-version-check -q yt-dlp
+          yt-dlp --no-warnings --skip-download --write-info-json --write-subs --write-auto-subs \
+            --sub-langs "zh-CN,zh-Hans,zh-Hant,zh,en,all" \
+            -o "results/subtitles/%(id)s.%(ext)s" "$SOURCE_URL" || true
+
+          # Normalise an existing subtitle track into a timestamped transcript before using ASR.
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          root = Path("results")
+          subdir = root / "subtitles"
+          candidates = sorted(subdir.glob("*.json")) + sorted(subdir.glob("*.vtt")) + sorted(subdir.glob("*.srt"))
+          chosen = None
+          segments = []
+
+          def stamp(seconds):
+              seconds = max(0, float(seconds))
+              h = int(seconds // 3600)
+              m = int((seconds % 3600) // 60)
+              s = int(seconds % 60)
+              return f"{h:02d}:{m:02d}:{s:02d}"
+
+          for path in candidates:
+              try:
+                  if path.suffix.lower() == ".json":
+                      payload = json.loads(path.read_text(encoding="utf-8"))
+                      body = payload.get("body") if isinstance(payload, dict) else None
+                      if not isinstance(body, list) or len(body) < 3:
+                          continue
+                      trial = []
+                      for item in body:
+                          text = str(item.get("content") or "").strip()
+                          if text:
+                              trial.append((float(item.get("from") or 0), float(item.get("to") or 0), text))
+                      if len(trial) >= 3:
+                          segments = trial
+                          chosen = path
+                          break
+                  else:
+                      text = path.read_text(encoding="utf-8", errors="replace")
+                      lines = []
+                      for line in text.splitlines():
+                          line = line.strip()
+                          if not line or line.startswith(("WEBVTT", "Kind:", "Language:")):
+                              continue
+                          if re.match(r"^\d+$", line) or "-->" in line:
+                              continue
+                          line = re.sub(r"<[^>]+>", "", line).strip()
+                          if line and (not lines or line != lines[-1]):
+                              lines.append(line)
+                      if len(lines) >= 3:
+                          segments = [(0, 0, line) for line in lines]
+                          chosen = path
+                          break
+              except Exception:
+                  continue
+
+          if chosen and segments:
+              rendered = []
+              for start, _, text in segments:
+                  prefix = f"[{stamp(start)}] " if start else ""
+                  rendered.append(prefix + text)
+              (root / "transcript.txt").write_text("\n".join(rendered), encoding="utf-8")
+              (root / "transcript-source.txt").write_text(f"subtitle:{chosen}\n", encoding="utf-8")
+              print(f"Using subtitle transcript: {chosen}")
+          else:
+              print("No usable subtitle track found; ASR fallback is required.")
+          PY
+
+          if [ ! -s results/transcript.txt ]; then
+            # Download a low-resolution progressive MP4 through the proxy's non-redirecting stream route.
+            curl -fL --retry 4 --retry-delay 3 --connect-timeout 30 \
+              "https://fxbilibili.seria.moe/dl/${BV}" -o results/video.mp4 || true
+
+            if [ ! -s results/video.mp4 ]; then
+              yt-dlp --no-warnings -f "worst[ext=mp4]/worst" -o results/video.mp4 "$SOURCE_URL" || true
+            fi
+
+            if [ -s results/video.mp4 ]; then
+              ffprobe -v error -show_entries format=duration,size -of json results/video.mp4 \
+                > results/media-info.json || true
+              ffmpeg -hide_banner -loglevel error -y -i results/video.mp4 -vn -ac 1 -ar 16000 \
+                -c:a libmp3lame -b:a 48k results/audio.mp3
+
+              python -m pip install --disable-pip-version-check -q faster-whisper
+              python - <<'PY'
+              import json
+              from pathlib import Path
+              from faster_whisper import WhisperModel
+
+              root = Path("results")
+              model = WhisperModel("small", device="cpu", compute_type="int8")
+              segments_iter, info = model.transcribe(
+                  str(root / "audio.mp3"),
+                  language="zh",
+                  beam_size=5,
+                  vad_filter=True,
+                  vad_parameters={"min_silence_duration_ms": 500},
+                  condition_on_previous_text=True,
+              )
+
+              segments = []
+              lines = []
+              for segment in segments_iter:
+                  text = segment.text.strip()
+                  if not text:
+                      continue
+                  segments.append({"start": segment.start, "end": segment.end, "text": text})
+                  h = int(segment.start // 3600)
+                  m = int((segment.start % 3600) // 60)
+                  s = int(segment.start % 60)
+                  lines.append(f"[{h:02d}:{m:02d}:{s:02d}] {text}")
+
+              (root / "transcript.txt").write_text("\n".join(lines), encoding="utf-8")
+              (root / "transcript-segments.json").write_text(
+                  json.dumps({
+                      "language": info.language,
+                      "language_probability": info.language_probability,
+                      "duration": info.duration,
+                      "segments": segments,
+                  }, ensure_ascii=False, indent=2),
+                  encoding="utf-8",
+              )
+              (root / "transcript-source.txt").write_text("faster-whisper-small\n", encoding="utf-8")
+              print(f"Transcribed {len(segments)} segments")
+              PY
+            fi
+          fi
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("results")
+          status = {
+              "metadata_available": (root / "metadata-summary.json").exists(),
+              "transcript_available": (root / "transcript.txt").exists() and (root / "transcript.txt").stat().st_size > 0,
+              "transcript_source": (root / "transcript-source.txt").read_text(encoding="utf-8").strip()
+                  if (root / "transcript-source.txt").exists() else None,
+              "transcript_characters": (root / "transcript.txt").stat().st_size
+                  if (root / "transcript.txt").exists() else 0,
+          }
+          (root / "status.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
+          print(json.dumps(status, indent=2))
+          PY
+
+          # Do not retain or upload the source audiovisual file; only analysis outputs are archived.
+          rm -f results/video.mp4 results/audio.mp3
+
+      - name: Upload retrieval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bilibili-BV1mZ8X6uEqD-results
+          path: results/
+          if-no-files-found: error
+          retention-days: 1
