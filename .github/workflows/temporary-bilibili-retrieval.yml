@@ -11,28 +11,32 @@ permissions:
 jobs:
   retrieve-and-transcribe:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 90
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install retrieval dependency
+      - name: Install media and transcription dependencies
         shell: bash
-        run: python -m pip install --disable-pip-version-check -q requests
+        env:
+          HF_HUB_DISABLE_XET: "1"
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          python -m pip install --disable-pip-version-check -q requests faster-whisper
 
-      - name: Retrieve metadata, official subtitles, and the audio-only track
+      - name: Retrieve the verified audio-only stream
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p results
           python - <<'PY'
           from __future__ import annotations
 
           import hashlib
-          import html
           import json
-          import re
-          import subprocess
           import time
           import urllib.parse
           from pathlib import Path
@@ -41,391 +45,138 @@ jobs:
           import requests
 
           BV = "BV1mZ8X6uEqD"
-          KNOWN_AID = 117161104381826
-          KNOWN_CID = 41286173813
-          KNOWN_UP_MID = 593251783
           ROOT = Path("results")
-          ROOT.mkdir(parents=True, exist_ok=True)
-          (ROOT / "subtitles").mkdir(exist_ok=True)
-
           WBI_MIXIN_TABLE = (
               46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
               27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
               37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
               22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
           )
-          DEFAULT_HEADERS = {
+          HEADERS = {
               "User-Agent": (
                   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/140.0.0.0 Safari/537.36"
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
               ),
               "Referer": "https://www.bilibili.com/",
               "Origin": "https://www.bilibili.com",
               "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
           }
-
           session = requests.Session()
-          session.headers.update(DEFAULT_HEADERS)
+          session.headers.update(HEADERS)
 
-          def write_json(path: Path, value: Any) -> None:
-              path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-
-          def request_json(url: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
-              response = session.get(url, params=params, timeout=(20, 45))
+          def get_json(url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+              response = session.get(url, params=params, timeout=(20, 60))
               response.raise_for_status()
-              try:
-                  return response.json()
-              except Exception as exc:
-                  raise RuntimeError(
-                      f"Expected JSON from {response.url}; status={response.status_code}; "
-                      f"body={response.text[:300]!r}"
-                  ) from exc
+              return response.json()
 
-          def parse_og(source: str) -> dict[str, str]:
-              result: dict[str, str] = {}
-              for prop in (
-                  "og:title", "og:description", "og:image", "og:video",
-                  "og:video:url", "article:published_time",
-              ):
-                  patterns = (
-                      rf'<meta[^>]+(?:property|name)=["\']{re.escape(prop)}["\'][^>]+content=["\']([^"\']*)',
-                      rf'<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:property|name)=["\']{re.escape(prop)}["\']',
-                  )
-                  for pattern in patterns:
-                      match = re.search(pattern, source, re.I)
-                      if match:
-                          result[prop] = html.unescape(match.group(1))
-                          break
-              return result
-
-          # These bot-facing endpoints provide verified title/creator/media metadata.
-          fxb_response = session.get(
-              f"https://fxbilibili.seria.moe/video/{BV}",
-              headers={**DEFAULT_HEADERS, "User-Agent": "Discordbot/2.0"},
-              timeout=(20, 45),
-          )
-          fxb_response.raise_for_status()
-          (ROOT / "fxbilibili-embed.html").write_text(fxb_response.text, encoding="utf-8")
-          fxb_meta = parse_og(fxb_response.text)
-
-          bilifix_response = session.get(
-              f"https://www.vxbilibili.com/video/{BV}",
-              headers={**DEFAULT_HEADERS, "User-Agent": "Discordbot/2.0"},
-              timeout=(20, 45),
-          )
-          bilifix_response.raise_for_status()
-          (ROOT / "bilifix-embed.html").write_text(bilifix_response.text, encoding="utf-8")
-          bilifix_meta = parse_og(bilifix_response.text)
-
-          oembed = request_json(
-              "https://www.vxbilibili.com/oembed/video",
-              params={"id": BV, "lang": "zh-cn"},
-          )
-          write_json(ROOT / "bilifix-oembed.json", oembed)
-
-          nav = request_json("https://api.bilibili.com/x/web-interface/nav")
-          write_json(ROOT / "nav.json", nav)
-          wbi = (nav.get("data") or {}).get("wbi_img") or {}
-          img_url = wbi.get("img_url") or ""
-          sub_url = wbi.get("sub_url") or ""
-          if not img_url or not sub_url:
-              raise RuntimeError(f"Bilibili nav response did not expose WBI keys: {nav}")
-          img_key = img_url.rsplit("/", 1)[-1].split(".", 1)[0]
-          sub_key = sub_url.rsplit("/", 1)[-1].split(".", 1)[0]
+          nav = get_json("https://api.bilibili.com/x/web-interface/nav")
+          wbi = nav["data"]["wbi_img"]
+          img_key = wbi["img_url"].rsplit("/", 1)[-1].split(".", 1)[0]
+          sub_key = wbi["sub_url"].rsplit("/", 1)[-1].split(".", 1)[0]
           raw_key = img_key + sub_key
-          mixin_key = "".join(raw_key[index] for index in WBI_MIXIN_TABLE)[:32]
+          mixin_key = "".join(raw_key[i] for i in WBI_MIXIN_TABLE)[:32]
 
           def sign(params: dict[str, Any]) -> dict[str, str]:
-              safe: dict[str, str] = {}
+              signed: dict[str, str] = {}
               for key, value in params.items():
                   text = str(value)
                   for forbidden in "!'()*":
                       text = text.replace(forbidden, "")
-                  safe[key] = text
-              safe["wts"] = str(int(time.time()))
-              query = urllib.parse.urlencode(sorted(safe.items()))
-              safe["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
-              return safe
+                  signed[key] = text
+              signed["wts"] = str(int(time.time()))
+              query = urllib.parse.urlencode(sorted(signed.items()))
+              signed["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
+              return signed
 
-          view: dict[str, Any] = {}
-          try:
-              view = request_json(
-                  "https://api.bilibili.com/x/web-interface/wbi/view",
-                  params=sign({"bvid": BV}),
-              )
-          except Exception as exc:
-              view = {"retrieval_error": repr(exc)}
-          write_json(ROOT / "view.json", view)
-          view_data = view.get("data") if isinstance(view.get("data"), dict) else {}
-
-          aid = int(view_data.get("aid") or KNOWN_AID)
-          cid = int(view_data.get("cid") or KNOWN_CID)
-          owner = view_data.get("owner") if isinstance(view_data.get("owner"), dict) else {}
-          up_mid = int(owner.get("mid") or KNOWN_UP_MID)
-
-          metadata = {
-              "bvid": BV,
-              "aid": aid,
-              "cid": cid,
-              "up_mid": up_mid,
-              "title": view_data.get("title") or oembed.get("title") or fxb_meta.get("og:title"),
-              "description": view_data.get("desc") or bilifix_meta.get("og:description"),
-              "duration_seconds": view_data.get("duration"),
-              "published_unix": view_data.get("pubdate"),
-              "owner": owner or {"mid": up_mid, "name": oembed.get("author_name")},
-              "stats": view_data.get("stat"),
-              "fxbilibili": fxb_meta,
-              "bilifix": bilifix_meta,
-              "oembed": oembed,
-          }
-          write_json(ROOT / "metadata-summary.json", metadata)
-          print(json.dumps(metadata, ensure_ascii=False, indent=2))
-
-          # Query both subtitle descriptor variants. Public videos may expose creator or AI captions.
-          player_payloads: list[dict[str, Any]] = []
-          endpoints = (
-              (
-                  "player-v2.json",
-                  "https://api.bilibili.com/x/player/v2",
-                  {"bvid": BV, "aid": aid, "cid": cid},
-              ),
-              (
-                  "player-wbi-v2.json",
-                  "https://api.bilibili.com/x/player/wbi/v2",
-                  sign({"bvid": BV, "aid": aid, "cid": cid}),
-              ),
+          view = get_json(
+              "https://api.bilibili.com/x/web-interface/wbi/view",
+              sign({"bvid": BV}),
           )
-          for filename, endpoint, params in endpoints:
-              try:
-                  payload = request_json(endpoint, params=params)
-              except Exception as exc:
-                  payload = {"retrieval_error": repr(exc)}
-              write_json(ROOT / filename, payload)
-              player_payloads.append(payload)
+          if view.get("code") != 0:
+              raise RuntimeError(f"Bilibili view API failed: {view}")
+          data = view["data"]
+          cid = int(data["cid"])
 
-          subtitle_entries: list[dict[str, Any]] = []
-          seen_urls: set[str] = set()
-          for payload in player_payloads:
-              data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-              subtitle = data.get("subtitle") if isinstance(data.get("subtitle"), dict) else {}
-              for item in subtitle.get("subtitles") or []:
-                  url = item.get("subtitle_url") or item.get("url")
-                  if not url:
-                      continue
-                  if url.startswith("//"):
-                      url = "https:" + url
-                  if url in seen_urls:
-                      continue
-                  seen_urls.add(url)
-                  subtitle_entries.append({**item, "resolved_url": url})
-
-          subtitle_manifest: list[dict[str, Any]] = []
-          for index, entry in enumerate(subtitle_entries):
-              language = str(entry.get("lan") or entry.get("lan_doc") or f"track-{index}")
-              safe_language = re.sub(r"[^\w-]+", "_", language)
-              target = ROOT / "subtitles" / f"{index:02d}-{safe_language}.json"
-              try:
-                  subtitle_response = session.get(entry["resolved_url"], timeout=(20, 45))
-                  subtitle_response.raise_for_status()
-                  target.write_bytes(subtitle_response.content)
-                  subtitle_manifest.append({**entry, "local_file": str(target)})
-              except Exception as exc:
-                  subtitle_manifest.append({**entry, "download_error": repr(exc)})
-          write_json(ROOT / "subtitle-manifest.json", subtitle_manifest)
-
-          # Bilibili's own AI summary endpoint is queried opportunistically. It normally requires login,
-          # but saving the response tells us conclusively whether this video exposes a public outline.
-          try:
-              conclusion = request_json(
-                  "https://api.bilibili.com/x/web-interface/view/conclusion/get",
-                  params=sign({"bvid": BV, "cid": cid, "up_mid": up_mid}),
-              )
-          except Exception as exc:
-              conclusion = {"retrieval_error": repr(exc)}
-          write_json(ROOT / "bilibili-ai-conclusion.json", conclusion)
-
-          def timestamp(seconds: float) -> str:
-              seconds = max(0.0, float(seconds))
-              hours = int(seconds // 3600)
-              minutes = int((seconds % 3600) // 60)
-              secs = int(seconds % 60)
-              return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
-          # Prefer Chinese creator/AI captions when any official track is available.
-          preferred = sorted(
-              [item for item in subtitle_manifest if item.get("local_file")],
-              key=lambda item: (
-                  0 if str(item.get("lan") or "").lower().startswith(("ai-zh", "zh")) else 1,
-                  str(item.get("lan") or ""),
-              ),
-          )
-          transcript_created = False
-          if preferred:
-              chosen = preferred[0]
-              subtitle_payload = json.loads(Path(chosen["local_file"]).read_text(encoding="utf-8"))
-              body = subtitle_payload.get("body") if isinstance(subtitle_payload, dict) else None
-              if isinstance(body, list):
-                  rendered: list[str] = []
-                  for item in body:
-                      text = str(item.get("content") or "").strip()
-                      if text:
-                          rendered.append(f"[{timestamp(float(item.get('from') or 0))}] {text}")
-                  if rendered:
-                      (ROOT / "transcript.txt").write_text("\n".join(rendered), encoding="utf-8")
-                      (ROOT / "transcript-source.txt").write_text(
-                          f"official-subtitle:{chosen.get('lan') or chosen.get('lan_doc')}\n",
-                          encoding="utf-8",
-                      )
-                      transcript_created = True
-
-          downloaded_source: Path | None = None
-          selected_audio: dict[str, Any] | None = None
-          if not transcript_created:
-              play_params = {
+          playurl = get_json(
+              "https://api.bilibili.com/x/player/wbi/playurl",
+              sign({
                   "bvid": BV,
                   "cid": cid,
                   "qn": 16,
                   "fnval": 4048,
                   "fnver": 0,
                   "fourk": 0,
-              }
-              playurl = request_json(
-                  "https://api.bilibili.com/x/player/wbi/playurl",
-                  params=sign(play_params),
-              )
-              write_json(ROOT / "playurl.json", playurl)
-              play_data = playurl.get("data") if isinstance(playurl.get("data"), dict) else {}
-              dash = play_data.get("dash") if isinstance(play_data.get("dash"), dict) else {}
-              audio_options = dash.get("audio") if isinstance(dash.get("audio"), list) else []
-              audio_options = [item for item in audio_options if isinstance(item, dict)]
-              if audio_options:
-                  selected_audio = min(
-                      audio_options,
-                      key=lambda item: int(item.get("bandwidth") or 10**12),
-                  )
+              }),
+          )
+          if playurl.get("code") != 0:
+              raise RuntimeError(f"Bilibili playurl API failed: {playurl}")
+          audio_options = ((playurl.get("data") or {}).get("dash") or {}).get("audio") or []
+          if not audio_options:
+              raise RuntimeError("Bilibili playurl returned no audio tracks")
+          selected = min(audio_options, key=lambda item: int(item.get("bandwidth") or 10**12))
+          urls = []
+          primary = selected.get("baseUrl") or selected.get("base_url")
+          if primary:
+              urls.append(primary)
+          urls.extend(selected.get("backupUrl") or selected.get("backup_url") or [])
 
-              candidate_urls: list[tuple[str, str]] = []
-              if selected_audio:
-                  primary = selected_audio.get("baseUrl") or selected_audio.get("base_url")
-                  if primary:
-                      candidate_urls.append(("dash-audio-primary", primary))
-                  backups = selected_audio.get("backupUrl") or selected_audio.get("backup_url") or []
-                  for index, backup in enumerate(backups):
-                      candidate_urls.append((f"dash-audio-backup-{index}", backup))
-              progressive = fxb_meta.get("og:video")
-              if progressive:
-                  candidate_urls.append(("progressive-origin", progressive))
-              bilifix_media = bilifix_meta.get("og:video")
-              if bilifix_media:
-                  candidate_urls.append(("bilifix-media-proxy", bilifix_media))
-
-              if not candidate_urls:
-                  raise RuntimeError("No downloadable audio or progressive media URL was returned")
-
-              def download_resumable(url: str, target: Path) -> None:
-                  last_error: Exception | None = None
-                  for attempt in range(12):
-                      existing = target.stat().st_size if target.exists() else 0
-                      headers = dict(DEFAULT_HEADERS)
-                      if existing:
-                          headers["Range"] = f"bytes={existing}-"
-                      try:
-                          with session.get(
-                              url,
-                              headers=headers,
-                              stream=True,
-                              timeout=(25, 60),
-                          ) as response:
-                              if response.status_code == 416 and existing:
-                                  return
-                              response.raise_for_status()
-                              append = existing > 0 and response.status_code == 206
-                              if existing and not append:
-                                  existing = 0
-                              mode = "ab" if append else "wb"
-                              expected = int(response.headers.get("Content-Length") or 0)
-                              written = 0
-                              with target.open(mode) as output:
-                                  for chunk in response.iter_content(chunk_size=1024 * 1024):
-                                      if chunk:
-                                          output.write(chunk)
-                                          written += len(chunk)
-                              if expected and written < expected:
-                                  raise IOError(
-                                      f"Short response: received {written} of {expected} bytes"
-                                  )
-                              if target.stat().st_size <= 0:
-                                  raise IOError("Downloaded file is empty")
-                              return
-                      except Exception as exc:
-                          last_error = exc
-                          time.sleep(min(2 + attempt, 10))
-                  raise RuntimeError(f"Download failed after resumable retries: {last_error!r}")
-
-              errors: list[dict[str, str]] = []
-              for label, media_url in candidate_urls:
-                  extension = ".m4s" if label.startswith("dash-audio") else ".mp4"
-                  target = ROOT / f"source-media{extension}"
-                  try:
-                      download_resumable(media_url, target)
-                      downloaded_source = target
-                      write_json(
-                          ROOT / "media-selection.json",
-                          {
-                              "source": label,
-                              "selected_audio": selected_audio,
-                              "downloaded_bytes": target.stat().st_size,
-                          },
-                      )
+          target = ROOT / "audio-source.m4s"
+          failures: list[str] = []
+          for media_url in urls:
+              try:
+                  with session.get(media_url, stream=True, timeout=(25, 90)) as response:
+                      response.raise_for_status()
+                      with target.open("wb") as output:
+                          for chunk in response.iter_content(chunk_size=1024 * 1024):
+                              if chunk:
+                                  output.write(chunk)
+                  if target.stat().st_size > 100_000:
                       break
-                  except Exception as exc:
-                      errors.append({"source": label, "error": repr(exc)})
-                      target.unlink(missing_ok=True)
-              write_json(ROOT / "media-download-errors.json", errors)
-              if downloaded_source is None:
-                  raise RuntimeError(f"All media candidates failed: {errors}")
+                  raise RuntimeError(f"Downloaded audio was unexpectedly small: {target.stat().st_size}")
+              except Exception as exc:
+                  failures.append(repr(exc))
+                  target.unlink(missing_ok=True)
+          if not target.exists():
+              raise RuntimeError(f"All signed audio URLs failed: {failures}")
 
-              probe = subprocess.run(
-                  [
-                      "ffprobe", "-v", "error", "-show_entries",
-                      "format=duration,size,format_name:stream=index,codec_name,codec_type",
-                      "-of", "json", str(downloaded_source),
-                  ],
-                  check=True,
-                  capture_output=True,
-                  text=True,
-              )
-              (ROOT / "media-info.json").write_text(probe.stdout, encoding="utf-8")
-              subprocess.run(
-                  [
-                      "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                      "-i", str(downloaded_source), "-vn", "-ac", "1", "-ar", "16000",
-                      "-c:a", "libmp3lame", "-b:a", "48k", str(ROOT / "audio.mp3"),
-                  ],
-                  check=True,
-              )
-
-          status = {
-              "metadata_available": True,
-              "official_subtitle_tracks": len(subtitle_manifest),
-              "transcript_available": (ROOT / "transcript.txt").exists(),
-              "audio_ready_for_asr": (ROOT / "audio.mp3").exists(),
-              "bilibili_ai_conclusion_code": conclusion.get("code"),
+          staff = [
+              {"name": item.get("name"), "role": item.get("title"), "official": (item.get("official") or {}).get("title")}
+              for item in data.get("staff") or []
+          ]
+          metadata = {
+              "bvid": BV,
+              "aid": data.get("aid"),
+              "cid": cid,
+              "title": data.get("title"),
+              "description": data.get("desc"),
+              "duration_seconds": data.get("duration"),
+              "published_unix": data.get("pubdate"),
+              "owner": data.get("owner"),
+              "staff": staff,
+              "stats": data.get("stat"),
+              "audio_track": {
+                  "id": selected.get("id"),
+                  "bandwidth": selected.get("bandwidth"),
+                  "mime_type": selected.get("mimeType") or selected.get("mime_type"),
+                  "codecs": selected.get("codecs"),
+                  "downloaded_bytes": target.stat().st_size,
+              },
           }
-          write_json(ROOT / "retrieval-status.json", status)
-          print(json.dumps(status, ensure_ascii=False, indent=2))
+          (ROOT / "metadata.json").write_text(
+              json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(metadata, ensure_ascii=False, indent=2))
           PY
 
-      - name: Install speech recognizer
-        if: ${{ hashFiles('results/transcript.txt') == '' && hashFiles('results/audio.mp3') != '' }}
-        shell: bash
-        env:
-          HF_HUB_DISABLE_XET: "1"
-        run: python -m pip install --disable-pip-version-check -q faster-whisper
+          ffprobe -v error \
+            -show_entries format=duration,size,format_name:stream=index,codec_name,codec_type \
+            -of json results/audio-source.m4s > results/media-info.json
+          ffmpeg -hide_banner -loglevel error -y \
+            -i results/audio-source.m4s -vn -ac 1 -ar 16000 \
+            -c:a libmp3lame -b:a 48k results/audio.mp3
+          test -s results/audio.mp3
 
-      - name: Transcribe retrieved audio
-        if: ${{ hashFiles('results/transcript.txt') == '' && hashFiles('results/audio.mp3') != '' }}
+      - name: Transcribe the interview
         shell: bash
         env:
           HF_HUB_DISABLE_XET: "1"
@@ -433,16 +184,18 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           from faster_whisper import WhisperModel
 
           root = Path("results")
+          threads = max(2, min(8, os.cpu_count() or 4))
           model = WhisperModel(
               "small",
               device="cpu",
               compute_type="int8",
-              cpu_threads=4,
+              cpu_threads=threads,
               num_workers=2,
           )
           generated, info = model.transcribe(
@@ -453,8 +206,8 @@ jobs:
               vad_parameters={"min_silence_duration_ms": 500},
               condition_on_previous_text=True,
               initial_prompt=(
-                  "这是一段关于投资、财富创造、科技趋势、创业和人生选择的访谈。"
-                  "嘉宾是拉斯·特维德（Lars Tvede）。"
+                  "这是一段关于投资、财富创造、创业、科技趋势和人生选择的访谈。"
+                  "主持人是本子在隔壁，嘉宾是投资人 Lars Tvede，中文名拉斯·特维德。"
               ),
           )
 
@@ -471,16 +224,15 @@ jobs:
               lines.append(f"[{hours:02d}:{minutes:02d}:{seconds:02d}] {text}")
 
           if not segments:
-              raise RuntimeError("Speech recognition returned no segments")
+              raise RuntimeError("Speech recognition returned no text")
 
           (root / "transcript.txt").write_text("\n".join(lines), encoding="utf-8")
-          (root / "transcript-source.txt").write_text("faster-whisper-small\n", encoding="utf-8")
           (root / "transcript-segments.json").write_text(
               json.dumps(
                   {
                       "language": info.language,
                       "language_probability": info.language_probability,
-                      "duration": info.duration,
+                      "duration_seconds": info.duration,
                       "segments": segments,
                   },
                   ensure_ascii=False,
@@ -488,16 +240,16 @@ jobs:
               ),
               encoding="utf-8",
           )
-          (root / "asr-status.json").write_text(
+          (root / "status.json").write_text(
               json.dumps(
                   {
                       "transcript_available": True,
-                      "source": "faster-whisper-small",
+                      "model": "faster-whisper-small",
                       "detected_language": info.language,
                       "language_probability": info.language_probability,
                       "duration_seconds": info.duration,
                       "segment_count": len(segments),
-                      "character_count": len("".join(lines)),
+                      "transcript_characters": len("".join(lines)),
                   },
                   ensure_ascii=False,
                   indent=2,
@@ -513,9 +265,9 @@ jobs:
       - name: Remove source audiovisual files
         if: always()
         shell: bash
-        run: rm -f results/source-media.m4s results/source-media.mp4 results/audio.mp3
+        run: rm -f results/audio-source.m4s results/audio.mp3
 
-      - name: Upload retrieval results
+      - name: Upload verified metadata and transcript
         if: always()
         uses: actions/upload-artifact@v4
         with:
