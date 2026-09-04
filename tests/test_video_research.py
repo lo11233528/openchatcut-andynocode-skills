@@ -160,3 +160,19 @@ def test_sanitize_diagnostics(tmp_path: pathlib.Path):
     subtitle = (tmp_path / "parts/p001/subtitle-index.json").read_text(encoding="utf-8")
     assert "secret" not in retained
     assert "secret" not in subtitle
+
+
+def test_marketplace_manifests_and_skill_copy():
+    marketplace = json.loads(
+        (ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")
+    )
+    plugin = json.loads(
+        (ROOT / "plugins/video-research/.codex-plugin/plugin.json").read_text(encoding="utf-8")
+    )
+    assert marketplace["plugins"][0]["name"] == "video-research"
+    assert marketplace["plugins"][0]["source"]["path"] == "./plugins/video-research"
+    assert plugin["name"] == "video-research"
+    assert plugin["version"] == "4.0.0"
+    assert (ROOT / "skills/video-research/SKILL.md").read_text(encoding="utf-8") == (
+        ROOT / "plugins/video-research/skills/video-research/SKILL.md"
+    ).read_text(encoding="utf-8")
