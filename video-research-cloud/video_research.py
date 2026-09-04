@@ -15,7 +15,15 @@ if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
 from vr_bilibili import BilibiliResearcher
-from vr_core import Bundle, RequestConfig, ResearchError, Runner, parse_json3, parse_vtt
+from vr_core import (
+    Bundle,
+    RequestConfig,
+    ResearchError,
+    Runner,
+    parse_json3,
+    parse_vtt,
+    redact_for_logs,
+)
 from vr_youtube import YouTubeResearcher
 
 
@@ -89,6 +97,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Video research failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:
+        # Defense in depth: raw media must never be part of the uploaded artifact.
         for pattern in ("*.mp3", "*.m4a", "*.webm", "*.mp4", "*.flv", "*.m4s", "*.ts"):
             for path in bundle.root.rglob(pattern):
                 path.unlink(missing_ok=True)
