@@ -135,3 +135,14 @@ def test_issue_event_request():
     request = pr.request_from_event(event, "issues")
     assert request["url"] == "https://youtu.be/abc1234"
     assert request["job_id"].startswith("issue-12-")
+
+
+def test_log_redaction():
+    row = vr.redact_for_logs(
+        {
+            "url": "https://example.com/media?token=secret",
+            "nested": {"base_url": "https://cdn.example.com/a", "cookie": "x"},
+        }
+    )
+    assert "secret" not in json.dumps(row)
+    assert row["nested"]["cookie"] == "<redacted>"
