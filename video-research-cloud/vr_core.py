@@ -155,6 +155,25 @@ class PartResult:
     warnings: list[str]
 
 
+def redact_for_logs(value: Any) -> Any:
+    """Remove expiring media URLs, cookies, and auth-like values from artifacts."""
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower().replace("-", "_")
+            if lowered in {"authorization", "cookie", "set_cookie"}:
+                result[str(key)] = "<redacted>"
+            elif "url" in lowered and isinstance(item, str):
+                parsed = urllib.parse.urlparse(item)
+                result[str(key)] = f"<redacted-url host={parsed.hostname or 'unknown'}>"
+            else:
+                result[str(key)] = redact_for_logs(item)
+        return result
+    if isinstance(value, list):
+        return [redact_for_logs(item) for item in value]
+    return value
+
+
 class Bundle:
     def __init__(self, root: pathlib.Path):
         self.root = root
@@ -176,10 +195,14 @@ class Bundle:
 
     def log_http(self, name: str, response: requests.Response) -> None:
         safe = re.sub(r"[^0-9A-Za-z._-]+", "_", name)[:120]
+        safe_headers = {
+            key: ("<redacted>" if key.lower() in {"set-cookie", "cookie", "authorization"} else value)
+            for key, value in response.headers.items()
+        }
         meta = {
             "status": response.status_code,
-            "url": response.url,
-            "headers": dict(response.headers),
+            "url": response.url.split("?", 1)[0],
+            "headers": safe_headers,
             "content_length": len(response.content),
             "text_head": response.text[:1000],
         }
@@ -356,7 +379,8 @@ def media_duration_ok(actual: float, expected: float) -> bool:
         return False
     if expected <= 0:
         return actual >= 10
-    return actual >= max(10.0, expected * 0.95) or abs(actual - expected) <= 20.0
+    tolerance = max(3.0, min(20.0, expected * 0.03))
+    return actual >= max(10.0, expected * 0.95) or abs(actual - expected) <= tolerance
 
 
 def download_media(
