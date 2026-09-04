@@ -59,7 +59,7 @@ concurrency:
 
 jobs:
   research:
-    if: github.event_name != 'issues' || startsWith(github.event.issue.title, '[video-research]')
+    if: github.event_name != 'issues' || (startsWith(github.event.issue.title, '[video-research]') && github.event.issue.user.login == github.repository_owner)
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
