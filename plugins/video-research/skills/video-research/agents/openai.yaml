@@ -1,0 +1,4 @@
+interface:
+  display_name: "Video Research"
+  short_description: "Understand public videos with ChatGPT cloud"
+  default_prompt: "Use $video-research. Keep the user experience entirely inside ChatGPT, trigger the permanent GitHub-hosted cloud workflow when necessary, validate completeness, read the full transcript, inspect sampled frames, and then summarize and critically analyze the video. Never use Codex or the user's computer."
