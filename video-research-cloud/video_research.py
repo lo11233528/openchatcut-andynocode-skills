@@ -36,6 +36,24 @@ def platform_for(url: str) -> str:
     raise ResearchError(f"Unsupported video platform: {host}")
 
 
+def sanitize_diagnostics(bundle: Bundle) -> None:
+    """Redact expiring media URLs and auth-like fields from retained diagnostics."""
+    targets = list((bundle.root / "logs").rglob("*.json"))
+    targets.extend((bundle.root / "parts").rglob("subtitle-index.json"))
+    targets.extend((bundle.root / "parts").rglob("official-conclusion.json"))
+    targets.extend((bundle.root / "parts").rglob("media-candidates.json"))
+    for path in targets:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            path.write_text(
+                json.dumps(redact_for_logs(payload), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            # A malformed diagnostic should not hide the main extraction result.
+            continue
+
+
 def write_failure_manifest(bundle: Bundle, config: RequestConfig | None, exc: BaseException) -> None:
     existing: dict[str, Any] = {}
     manifest_path = bundle.root / "manifest.json"
@@ -97,6 +115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Video research failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:
+        sanitize_diagnostics(bundle)
         # Defense in depth: raw media must never be part of the uploaded artifact.
         for pattern in ("*.mp3", "*.m4a", "*.webm", "*.mp4", "*.flv", "*.m4s", "*.ts"):
             for path in bundle.root.rglob(pattern):
