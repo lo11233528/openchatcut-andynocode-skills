@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import pathlib
 import re
@@ -23,6 +22,7 @@ from vr_core import (
     Segment,
     clean_text,
     dedupe_segments,
+    redact_for_logs,
 )
 
 
@@ -113,7 +113,7 @@ class BilibiliClientMixin:
         self.bundle.log_http(f"bili-{name}", response)
         response.raise_for_status()
         payload = response.json()
-        self.bundle.json(f"logs/bili-{name}-payload.json", payload)
+        self.bundle.json(f"logs/bili-{name}-payload.json", redact_for_logs(payload))
         if required_code and payload.get("code") != 0:
             raise ResearchError(
                 f"Bilibili API {name} returned code={payload.get('code')}: "
@@ -350,7 +350,17 @@ class BilibiliClientMixin:
             candidates.extend(self._collect_candidates(label, payload))
         self.bundle.json(
             f"parts/p{part:03d}/media-candidates.json",
-            [dataclasses.asdict(item) for item in candidates],
+            [
+                {
+                    "label": item.label,
+                    "kind": item.kind,
+                    "bandwidth": item.bandwidth,
+                    "codecs": item.codecs,
+                    "host": urllib.parse.urlparse(item.url).hostname,
+                    "url_sha256": hashlib.sha256(item.url.encode()).hexdigest(),
+                }
+                for item in candidates
+            ],
         )
         return candidates
 
