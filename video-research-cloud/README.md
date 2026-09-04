@@ -9,7 +9,7 @@ A cloud-only retrieval pipeline for public YouTube and Bilibili videos. The user
 - Uses AssemblyAI when `ASSEMBLYAI_API_KEY` exists; otherwise uses `faster-whisper` in the GitHub-hosted cloud runner.
 - Samples up to 20 representative frames when requested.
 - Rejects incomplete media when the retrieved duration is materially shorter than the expected duration.
-- Emits `manifest.json`, `metadata.json`, `transcript.txt`, `transcript_timed.md`, `transcript.json`, `frames/index.json`, sampled JPEGs, and diagnostic logs.
+- Emits `manifest.json`, `metadata.json`, `transcript.txt`, `transcript_timed.md`, `transcript.json`, `frames/index.json`, sampled JPEGs, and redacted diagnostic logs.
 - Deletes raw audio and video before artifact upload.
 
 ## What it does not do
@@ -21,7 +21,7 @@ A cloud-only retrieval pipeline for public YouTube and Bilibili videos. The user
 
 ## ChatGPT trigger
 
-Create a GitHub issue whose title starts with:
+The workflow accepts issue-triggered jobs only when the issue was opened by the repository owner. Create a GitHub issue whose title starts with:
 
 ```text
 [video-research]
@@ -49,8 +49,8 @@ Add a repository Actions secret named `ASSEMBLYAI_API_KEY`. When absent, the wor
 
 ## Completion gate
 
-A result is marked complete only when a usable transcript exists and processed media coverage is at least 90% of the expected selected-part duration. Partial or failed jobs still upload their manifest and logs, but the workflow ends in failure so ChatGPT cannot silently treat them as complete.
+A result is marked complete only when a usable transcript exists and processed media coverage is at least 95% of the expected selected-part duration. Partial or failed jobs still upload their manifest and logs, but the workflow ends in failure so ChatGPT cannot silently treat them as complete.
 
 ## Artifact retention
 
-Artifacts are retained for three days. They contain text, metadata, sampled frames, and logs—not raw audio or video.
+Artifacts are retained for three days. They contain text, metadata, sampled frames, and redacted logs—not raw audio or video.
