@@ -146,3 +146,17 @@ def test_log_redaction():
     )
     assert "secret" not in json.dumps(row)
     assert row["nested"]["cookie"] == "<redacted>"
+
+
+def test_sanitize_diagnostics(tmp_path: pathlib.Path):
+    bundle = vr.Bundle(tmp_path)
+    bundle.json("logs/player.json", {"url": "https://cdn.example/a?token=secret"})
+    bundle.json(
+        "parts/p001/subtitle-index.json",
+        [{"subtitle_url": "https://cdn.example/sub?sig=secret"}],
+    )
+    vr.sanitize_diagnostics(bundle)
+    retained = (tmp_path / "logs/player.json").read_text(encoding="utf-8")
+    subtitle = (tmp_path / "parts/p001/subtitle-index.json").read_text(encoding="utf-8")
+    assert "secret" not in retained
+    assert "secret" not in subtitle
