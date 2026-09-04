@@ -1,0 +1,36 @@
+name: Video Research Tests
+
+on:
+  pull_request:
+    paths:
+      - "video-research-cloud/**"
+      - "skills/video-research/**"
+      - "tests/test_video_research.py"
+      - ".github/workflows/video-research-*.yml"
+  push:
+    branches:
+      - feature/video-research-cloud-v4
+    paths:
+      - "video-research-cloud/**"
+      - "skills/video-research/**"
+      - "tests/test_video_research.py"
+      - ".github/workflows/video-research-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: python -m pip install pytest requests
+      - name: Compile Python sources
+        run: python -m compileall -q video-research-cloud tests
+      - name: Run unit tests
+        run: pytest -q
