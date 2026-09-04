@@ -1,0 +1,208 @@
+name: Video Research Cloud
+
+on:
+  issues:
+    types: [opened, reopened]
+  workflow_dispatch:
+    inputs:
+      url:
+        description: Public YouTube or Bilibili URL
+        required: true
+        type: string
+      job_id:
+        description: Optional stable job identifier
+        required: false
+        type: string
+      language:
+        description: auto, zh, en, or another language hint
+        required: false
+        default: auto
+        type: string
+      include_frames:
+        description: Extract representative visual frames
+        required: false
+        default: true
+        type: boolean
+      max_frames:
+        description: Maximum sampled frames (0-20)
+        required: false
+        default: "12"
+        type: string
+      part:
+        description: Bilibili part number; omit to use URL p= or part 1
+        required: false
+        type: string
+      all_parts:
+        description: Process every Bilibili part
+        required: false
+        default: false
+        type: boolean
+      transcription_backend:
+        description: auto, assemblyai, or whisper
+        required: false
+        default: auto
+        type: choice
+        options: [auto, assemblyai, whisper]
+  push:
+    branches:
+      - feature/video-research-cloud-v4
+    paths:
+      - video-research-cloud/test-requests/*.json
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: video-research-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  research:
+    if: github.event_name != 'issues' || (startsWith(github.event.issue.title, '[video-research]') && github.event.issue.user.login == github.repository_owner)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ASSEMBLYAI_API_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
+      WHISPER_MODEL: small
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: video-research-cloud/requirements.txt
+
+      - name: Normalize request
+        id: request
+        run: |
+          python video-research-cloud/parse_request.py \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --output /tmp/video-research-request.json
+          cat /tmp/video-research-request.json
+
+      - name: Announce accepted cloud job
+        if: github.event_name == 'issues'
+        uses: actions/github-script@v7
+        env:
+          ARTIFACT_NAME: ${{ steps.request.outputs.artifact_name }}
+        with:
+          script: |
+            const body = [
+              'Video Research cloud job accepted.',
+              '',
+              `- run_id: ${context.runId}`,
+              `- artifact: ${process.env.ARTIFACT_NAME}`,
+              `- runner: GitHub-hosted Ubuntu cloud`,
+              '',
+              'Raw audio/video will be deleted before the result artifact is uploaded.'
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+      - name: Install extraction dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install -r video-research-cloud/requirements.txt
+
+      - name: Extract, transcribe, and sample frames
+        id: research
+        continue-on-error: true
+        run: |
+          rm -rf video-research-output
+          mkdir -p video-research-output
+          python video-research-cloud/video_research.py \
+            --request /tmp/video-research-request.json \
+            --output video-research-output
+
+      - name: Build artifact inventory
+        if: always()
+        run: |
+          mkdir -p video-research-output
+          find video-research-output -type f -printf '%P\t%s bytes\n' | sort \
+            > video-research-output/ARTIFACT_FILES.txt
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('video-research-output/manifest.json')
+          if path.exists():
+              data = json.loads(path.read_text(encoding='utf-8'))
+              print(json.dumps(data, ensure_ascii=False, indent=2))
+          else:
+              print('manifest.json is missing')
+          PY
+
+      - name: Upload validated research materials
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.request.outputs.artifact_name }}
+          path: video-research-output/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
+
+      - name: Report result and close request issue
+        if: always() && github.event_name == 'issues'
+        uses: actions/github-script@v7
+        env:
+          ARTIFACT_NAME: ${{ steps.request.outputs.artifact_name }}
+          RESEARCH_OUTCOME: ${{ steps.research.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            let manifest = {};
+            try {
+              manifest = JSON.parse(fs.readFileSync('video-research-output/manifest.json', 'utf8'));
+            } catch (error) {
+              manifest = { status: 'failed', error: `manifest unavailable: ${error.message}` };
+            }
+            const pct = manifest.coverage_ratio == null
+              ? 'unknown'
+              : `${(Number(manifest.coverage_ratio) * 100).toFixed(1)}%`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `Video Research cloud job **${manifest.status || process.env.RESEARCH_OUTCOME}**.`,
+              '',
+              `- run_id: ${context.runId}`,
+              `- artifact: ${process.env.ARTIFACT_NAME}`,
+              `- platform: ${manifest.platform || 'unknown'}`,
+              `- title: ${manifest.title || 'unavailable'}`,
+              `- coverage: ${pct}`,
+              `- transcript source: ${(manifest.transcript_sources || []).join(', ') || 'unavailable'}`,
+              `- sampled frames: ${manifest.frame_count ?? 0}`,
+              manifest.error ? `- error: ${manifest.error}` : null,
+              '',
+              `Run: ${runUrl}`
+            ].filter(Boolean).join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              state: 'closed'
+            });
+
+      - name: Enforce completion gate
+        if: steps.research.outcome != 'success'
+        run: |
+          echo "Video research did not pass the complete-result gate. Inspect the uploaded manifest and logs."
+          exit 1

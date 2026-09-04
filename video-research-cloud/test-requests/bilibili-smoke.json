@@ -1,0 +1,9 @@
+{
+  "url": "https://www.bilibili.com/video/BV1mZ8X6uEqD/",
+  "job_id": "bilibili-smoke-BV1mZ8X6uEqD-v4-sanitized",
+  "language": "zh",
+  "include_frames": true,
+  "max_frames": 4,
+  "all_parts": false,
+  "transcription_backend": "auto"
+}

@@ -1,0 +1,37 @@
+{
+  "name": "video-research",
+  "version": "4.0.0",
+  "description": "Retrieve and analyze public YouTube and Bilibili videos through ChatGPT plus a permanent GitHub-hosted cloud workflow, with full-transcript validation and sampled-frame inspection.",
+  "author": {
+    "name": "Andy Lo"
+  },
+  "license": "MIT",
+  "keywords": [
+    "youtube",
+    "bilibili",
+    "video",
+    "transcript",
+    "github-actions",
+    "cloud",
+    "summary",
+    "analysis"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Video Research",
+    "shortDescription": "Understand videos with ChatGPT cloud",
+    "longDescription": "Use ChatGPT as the only user interface. When direct access is incomplete, trigger the permanent Video Research Cloud workflow on a GitHub-hosted runner, validate at least 95 percent coverage, read the complete transcript, inspect sampled frames, and critically analyze the video. No Codex execution or user-device video processing is used.",
+    "developerName": "Andy Lo",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": "Use ChatGPT and the connected GitHub cloud workflow to retrieve the complete public video, validate coverage, read the full transcript, inspect representative frames, then summarize and critically analyze it. Never use Codex or the user's computer.",
+    "brandColor": "#FF4D4F",
+    "composerIcon": "./assets/video-research.svg",
+    "logo": "./assets/video-research.svg",
+    "screenshots": []
+  }
+}

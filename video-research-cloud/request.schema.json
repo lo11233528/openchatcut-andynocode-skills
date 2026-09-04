@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lo11233528/openchatcut-andynocode-skills/video-research/request.schema.json",
+  "title": "Video Research Cloud Request",
+  "type": "object",
+  "required": ["url"],
+  "additionalProperties": false,
+  "properties": {
+    "url": {
+      "type": "string",
+      "pattern": "^https://(www\\.)?(bilibili\\.com|youtube\\.com|youtube-nocookie\\.com)/|^https://(b23\\.tv|youtu\\.be)/"
+    },
+    "job_id": {"type": "string", "maxLength": 96},
+    "language": {"type": "string", "default": "auto"},
+    "include_frames": {"type": "boolean", "default": true},
+    "max_frames": {"type": "integer", "minimum": 0, "maximum": 20, "default": 12},
+    "part": {"type": "integer", "minimum": 1},
+    "all_parts": {"type": "boolean", "default": false},
+    "transcription_backend": {
+      "type": "string",
+      "enum": ["auto", "assemblyai", "whisper"],
+      "default": "auto"
+    }
+  }
+}
